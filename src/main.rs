@@ -511,7 +511,11 @@ fn print_fs_entry_snapshot(
 			));
 			println!("{colored_str}");
 			if max_depth != 0 {
-				for (name, file_snapshot) in &snapshot.files {
+				let mut sorted_files: Vec<_> = snapshot.files.iter().by_ref().collect();
+				sorted_files.sort_by_key(|(_, file)| file.size());
+				sorted_files.reverse();
+
+				for (name, file_snapshot) in sorted_files {
 					print_fs_entry_snapshot(
 						&name,
 						&file_snapshot,
@@ -761,9 +765,18 @@ fn handle_compare(args: clap::ArgMatches, context: &mut Context) {
 		if let FSEntrySnapshotDiff::Directory(dir_diff) = diff {
 			let mut add_newline = false;
 			if dir_diff.file_diffs.len() != 0 {
+				let mut sorted_diffs: Vec<_> = dir_diff.file_diffs.iter().by_ref().collect();
+				sorted_diffs.sort_by_key(|&(_, diff)| {
+					diff
+						.size_diff()
+						.map(|size_diff| size_diff.new_size as i64 - size_diff.old_size as i64)
+						.unwrap_or(0)
+				});
+				sorted_diffs.reverse();
+
 				let mut first = true;
 				let mut previous_was_dir = false;
-				for (name, snapshot_diff) in &dir_diff.file_diffs {
+				for (name, snapshot_diff) in sorted_diffs {
 					// We want empty dirs to look like files in the output (i.e. no surrounding newlines).
 					// So, we use SnapshotDiff::depth() instead of is_dir() to see if it actually has contents.
 					let dir_like = snapshot_diff.depth() != 0;
@@ -784,9 +797,13 @@ fn handle_compare(args: clap::ArgMatches, context: &mut Context) {
 					println!();
 				}
 
+				let mut sorted_diffs: Vec<_> = dir_diff.new_files.iter().by_ref().collect();
+				sorted_diffs.sort_by_key(|&(_, diff)| diff.size());
+				sorted_diffs.reverse();
+
 				print_indent(indent + 1);
 				println!("{}", "New files:".bright_red().bold());
-				for (name, snapshot) in &dir_diff.new_files {
+				for (name, snapshot) in sorted_diffs {
 					print_fs_entry_snapshot(name, snapshot, indent + 2, max_depth - 1, &|x| {
 						x.bright_red().bold()
 					});
@@ -799,9 +816,13 @@ fn handle_compare(args: clap::ArgMatches, context: &mut Context) {
 					println!();
 				}
 
+				let mut sorted_diffs: Vec<_> = dir_diff.deleted_files.iter().by_ref().collect();
+				sorted_diffs.sort_by_key(|&(_, diff)| diff.size());
+				sorted_diffs.reverse();
+
 				print_indent(indent + 1);
 				println!("{}", "Deleted files:".bright_green().bold());
-				for (name, snapshot) in &dir_diff.deleted_files {
+				for (name, snapshot) in sorted_diffs {
 					print_fs_entry_snapshot(name, snapshot, indent + 2, max_depth - 1, &|x| {
 						x.bright_green().bold()
 					});
