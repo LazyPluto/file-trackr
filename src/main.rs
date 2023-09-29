@@ -624,7 +624,7 @@ fn handle_show(args: clap::ArgMatches, context: &mut Context) {
 		snapshot
 	};
 
-	print_fs_entry_snapshot(&snapshot.path, &snapshot.root, 0, max_depth, &|x| x.white());
+	print_fs_entry_snapshot(&snapshot.path, &snapshot.root, 0, max_depth, &|x| x.normal());
 }
 
 fn handle_snap(args: clap::ArgMatches, context: &mut Context) {
