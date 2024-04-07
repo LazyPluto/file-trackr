@@ -1,353 +1,121 @@
-use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread::{self, JoinHandle};
 use std::time::SystemTime;
 
 use chrono::TimeZone;
 use clap::Parser;
 use colored::{Color, ColoredString, Colorize};
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DirSnapshot {
-	size: u64,
-	files: Vec<(String, FSEntrySnapshot)>,
+mod model;
+
+use model::{
+	DirSnapshot, FSEntrySnapshot, FSEntrySnapshotDiff, FSSnapshot, FSTrackDB, FileSnapshot,
+	PathPattern, SnapshotRule, SnapshotRuleSet,
+};
+
+enum SnapshotWorkerMessage {
+	Trace(PathBuf),
+	Error(String),
 }
 
-impl DirSnapshot {
-	fn get_file_snapshot(&self, filename: &String) -> Option<&FSEntrySnapshot> {
-		self.files
-			.iter()
-			.find_map(|(name, snapshot)| Some(snapshot).filter(|_| *name == *filename))
-	}
-
-	fn depth(&self) -> u32 {
-		self.files
-			.iter()
-			.map(|(_, snapshot)| 1 + snapshot.depth())
-			.max()
-			.unwrap_or(0)
-	}
+pub struct SnapshotTaker {
+	worker_thread: JoinHandle<io::Result<FSEntrySnapshot>>,
+	worker_rx: mpsc::Receiver<SnapshotWorkerMessage>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct FileSnapshot {
-	size: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-enum FSEntrySnapshot {
-	File(FileSnapshot),
-	Directory(DirSnapshot),
-}
-
-impl FSEntrySnapshot {
-	pub fn size(&self) -> u64 {
-		match self {
-			Self::File(snapshot) => snapshot.size,
-			Self::Directory(snapshot) => snapshot.size,
-		}
-	}
-
-	pub fn depth(&self) -> u32 {
-		match self {
-			Self::File(_) => 0,
-			Self::Directory(snapshot) => snapshot.depth(),
-		}
-	}
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct FSSnapshot {
-	root: FSEntrySnapshot,
-	path: String,
-	depth: u32,
-	time: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct FSTrack {
-	snapshots: Vec<FSSnapshot>,
-	depth: u32,
-}
-
-impl FSTrack {
-	pub fn new(depth: u32) -> Self {
+impl SnapshotTaker {
+	pub fn new(path: &Path, ruleset: SnapshotRuleSet) -> Self {
+		let (mut tx, rx) = mpsc::channel();
+		let path = path.to_owned();
+		let worker_thread = thread::spawn(move || Self::take_snapshot(&path, &ruleset, &mut tx));
 		Self {
-			snapshots: Vec::new(),
-			depth,
+			worker_thread,
+			worker_rx: rx,
 		}
 	}
 
-	pub fn add_snapshot(&mut self, snapshot: FSSnapshot) {
-		// Ensure that the snapshot that we're adding is newer than snapshots we have.
-		assert!(self
-			.snapshots
-			.last()
-			.map(|previous| previous.time <= snapshot.time)
-			.unwrap_or(true));
-		self.snapshots.push(snapshot);
-	}
-
-	pub fn latest_snapshot(&self) -> Option<&FSSnapshot> {
-		self.snapshots.last()
-	}
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct FSTrackDB {
-	tracked_paths: HashMap<PathBuf, FSTrack>,
-	snapshot_depth: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TrackPathErr {
-	PathAlreadyTracked,
-	PathDoesntExist,
-}
-
-impl FSTrackDB {
-	pub fn new() -> Self {
-		Self {
-			tracked_paths: HashMap::new(),
-			snapshot_depth: 3,
-		}
-	}
-
-	pub fn track_path(&mut self, path: &Path, depth: Option<u32>) -> Result<(), TrackPathErr> {
-		if self.tracked_paths.contains_key(path) {
-			return Err(TrackPathErr::PathAlreadyTracked);
-		}
-
-		if !path.exists() {
-			return Err(TrackPathErr::PathDoesntExist);
-		}
-
-		self.tracked_paths.insert(
-			path.to_owned(),
-			FSTrack::new(depth.unwrap_or(self.snapshot_depth)),
-		);
-
-		Ok(())
-	}
-
-	pub fn get_track(&self, path: &Path) -> Option<&FSTrack> {
-		self.tracked_paths.get(path)
-	}
-
-	pub fn get_track_mut(&mut self, path: &Path) -> Option<&mut FSTrack> {
-		self.tracked_paths.get_mut(path)
-	}
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SizeDiff {
-	old_size: u64,
-	new_size: u64,
-}
-
-impl SizeDiff {
-	pub fn compute(old: u64, new: u64) -> Option<Self> {
-		if old != new {
-			Some(Self {
-				old_size: old,
-				new_size: new,
-			})
-		} else {
-			None
-		}
-	}
-}
-
-struct FileSnapshotDiff {
-	size_diff: Option<SizeDiff>,
-}
-
-impl FileSnapshotDiff {
-	pub fn compute(old: &FileSnapshot, new: &FileSnapshot) -> Self {
-		Self {
-			size_diff: SizeDiff::compute(old.size, new.size),
-		}
-	}
-
-	pub fn has_changes(&self) -> bool {
-		self.size_diff.is_some()
-	}
-}
-
-struct DirSnapshotDiff {
-	size_diff: Option<SizeDiff>,
-	file_diffs: Vec<(String, FSEntrySnapshotDiff)>,
-	new_files: Vec<(String, FSEntrySnapshot)>,
-	deleted_files: Vec<(String, FSEntrySnapshot)>,
-}
-
-impl DirSnapshotDiff {
-	pub fn compute(old: &DirSnapshot, new: &DirSnapshot) -> Self {
-		let mut result = DirSnapshotDiff {
-			size_diff: SizeDiff::compute(old.size, new.size),
-			file_diffs: Vec::new(),
-			new_files: Vec::new(),
-			deleted_files: Vec::new(),
-		};
-
-		for (name_a, snapshot_a) in &old.files {
-			if let Some(snapshot_b) = new.get_file_snapshot(name_a) {
-				let snapshot_diff = FSEntrySnapshotDiff::compute(snapshot_a, snapshot_b);
-				if snapshot_diff.has_changes() {
-					result.file_diffs.push((name_a.clone(), snapshot_diff));
+	fn wait(self) -> io::Result<FSEntrySnapshot> {
+		while let Ok(message) = self.worker_rx.recv() {
+			match message {
+				SnapshotWorkerMessage::Trace(path) => println!("{}", path.display()),
+				SnapshotWorkerMessage::Error(error) => {
+					println!("{}", format!("ERROR: {error}").red())
 				}
-			} else {
-				result
-					.deleted_files
-					.push((name_a.clone(), snapshot_a.clone()));
 			}
 		}
 
-		for (name, snapshot) in &new.files {
-			if old.get_file_snapshot(name).is_none() {
-				result.new_files.push((name.clone(), snapshot.clone()));
-			}
-		}
-
-		result
+		self.worker_thread.join().expect("Worker thread crashed!")
 	}
 
-	pub fn has_changes(&self) -> bool {
-		self.size_diff.is_some()
-			|| self.new_files.len() != 0
-			|| self.deleted_files.len() != 0
-			|| self.file_diffs.len() != 0
-	}
-
-	pub fn depth(&self) -> u32 {
-		let file_diffs_depth = self
-			.file_diffs
-			.iter()
-			.map(|(_, diff)| 1 + diff.depth())
-			.max()
-			.unwrap_or(0);
-
-		let new_files_depth = self
-			.new_files
-			.iter()
-			.map(|(_, snapshot)| 1 + snapshot.depth())
-			.max()
-			.unwrap_or(0);
-
-		let deleted_files_depth = self
-			.deleted_files
-			.iter()
-			.map(|(_, snapshot)| 1 + snapshot.depth())
-			.max()
-			.unwrap_or(0);
-
-		file_diffs_depth
-			.max(new_files_depth)
-			.max(deleted_files_depth)
-	}
-}
-
-enum FSEntrySnapshotDiff {
-	File(FileSnapshotDiff),
-	Directory(DirSnapshotDiff),
-}
-
-impl FSEntrySnapshotDiff {
-	pub fn compute(old: &FSEntrySnapshot, new: &FSEntrySnapshot) -> Self {
-		match (&old, &new) {
-			(FSEntrySnapshot::File(old), FSEntrySnapshot::File(new)) => {
-				Self::File(FileSnapshotDiff::compute(old, new))
-			}
-			(FSEntrySnapshot::Directory(old), FSEntrySnapshot::Directory(new)) => {
-				Self::Directory(DirSnapshotDiff::compute(old, new))
-			}
-			_ => panic!(),
-		}
-	}
-
-	pub fn size_diff(&self) -> Option<SizeDiff> {
-		match self {
-			Self::File(file_diff) => file_diff.size_diff,
-			Self::Directory(dir_diff) => dir_diff.size_diff,
-		}
-	}
-
-	pub fn has_changes(&self) -> bool {
-		match self {
-			Self::File(file_diff) => file_diff.has_changes(),
-			Self::Directory(dir_diff) => dir_diff.has_changes(),
-		}
-	}
-
-	pub fn depth(&self) -> u32 {
-		match self {
-			Self::File(_) => 0,
-			Self::Directory(dir_diff) => dir_diff.depth(),
-		}
-	}
-
-	#[allow(dead_code)]
-	pub fn is_file(&self) -> bool {
-		match self {
-			Self::File(_) => true,
-			_ => false,
-		}
-	}
-
-	#[allow(dead_code)]
-	pub fn is_dir(&self) -> bool {
-		match self {
-			Self::Directory(_) => true,
-			_ => false,
-		}
-	}
-}
-
-fn take_snapshot(path: &Path, depth: u32) -> io::Result<FSEntrySnapshot> {
-	fn helper(path: &Path, depth: u32) -> io::Result<FSEntrySnapshot> {
-		if depth == 0 {
-			let size = dir_size(path)?;
-			let snapshot = DirSnapshot {
-				size,
+	fn take_snapshot(
+		path: &Path,
+		ruleset: &SnapshotRuleSet,
+		tx: &mut mpsc::Sender<SnapshotWorkerMessage>,
+	) -> io::Result<FSEntrySnapshot> {
+		fn helper(
+			root: &Path,
+			path: &Path,
+			ruleset: &SnapshotRuleSet,
+			tx: &mut mpsc::Sender<SnapshotWorkerMessage>,
+		) -> io::Result<FSEntrySnapshot> {
+			let mut snapshot = DirSnapshot {
+				size: 0,
 				files: Vec::new(),
 			};
-			return Ok(FSEntrySnapshot::Directory(snapshot));
-		}
+			for entry in fs::read_dir(path)? {
+				let file = entry?;
+				let path = file.path();
+				let metadata = file.metadata()?;
 
-		if depth == 1 {
-			println!("{:?}", path);
-		}
+				let sub_path = path.strip_prefix(root).unwrap();
+				let Some(depth) = ruleset.query(sub_path) else {
+					if metadata.is_dir() {
+						snapshot.size += dir_size(path)?;
+					} else if metadata.is_file() {
+						snapshot.size += metadata.len();
+					}
+					continue;
+				};
 
-		let mut snapshot = DirSnapshot {
-			size: 0,
-			files: Vec::new(),
-		};
-		for entry in fs::read_dir(path)? {
-			let file = entry?;
-			let file_snapshot = match file.metadata()? {
-				data if data.is_dir() => helper(&file.path(), depth - 1).ok(),
-				data if data.is_file() => {
-					let snapshot = FileSnapshot { size: data.len() };
-					Some(FSEntrySnapshot::File(snapshot))
+				if depth == 1 {
+					tx.send(SnapshotWorkerMessage::Trace(path.to_owned()))
+						.expect("Receiver was destroyed!");
 				}
-				_ => None,
-			};
 
-			if let Some(file_snapshot) = file_snapshot {
-				snapshot.size += file_snapshot.size();
-				snapshot.files.push((
-					file.file_name().as_os_str().to_str().unwrap().to_owned(),
-					file_snapshot,
-				));
+				let file_snapshot = match metadata {
+					data if data.is_dir() => match helper(root, &path, ruleset, tx) {
+						Ok(snapshot) => Some(snapshot),
+						Err(error) => {
+							let msg = format!("Failed to snap {}: {}", path.display(), error);
+							tx.send(SnapshotWorkerMessage::Error(msg))
+								.expect("Receiver was destroyed!");
+							None
+						}
+					},
+					data if data.is_file() => {
+						let snapshot = FileSnapshot { size: data.len() };
+						Some(FSEntrySnapshot::File(snapshot))
+					}
+					_ => None,
+				};
+
+				if let Some(file_snapshot) = file_snapshot {
+					snapshot.size += file_snapshot.size();
+					let file_name = file.file_name();
+					let file_name: &Path = file_name.as_ref();
+					let file_name = format!("{}", file_name.display());
+					snapshot.files.push((file_name, file_snapshot));
+				}
 			}
+
+			Ok(FSEntrySnapshot::Directory(snapshot))
 		}
 
-		Ok(FSEntrySnapshot::Directory(snapshot))
+		helper(path, path, ruleset, tx)
 	}
-
-	helper(path, depth)
 }
 
 fn to_human_readable_size(size: u64) -> String {
@@ -381,103 +149,6 @@ fn dir_size(path: impl Into<PathBuf>) -> io::Result<u64> {
 	}
 
 	dir_size(std::fs::read_dir(path.into())?)
-}
-
-fn scan_file_sizes(path: impl Into<PathBuf>) {
-	let path = path.into();
-	let mut total_size = 0;
-	for file in std::fs::read_dir(path).unwrap() {
-		match file {
-			Ok(file) => {
-				let file_type = file.file_type().unwrap();
-				let size = if file_type.is_dir() {
-					dir_size(file.path())
-				} else {
-					file.metadata().map(|metadata| metadata.len())
-				};
-				total_size += size.as_ref().unwrap_or(&0);
-				let file_name = file.file_name();
-				let file_name_str = file_name
-					.as_os_str()
-					.to_str()
-					.unwrap_or("Failed to convert path to string");
-				let file_size_str = size
-					.map(to_human_readable_size)
-					.unwrap_or_else(|err| format!("{:?}", err));
-				println!("{}: {}", file_name_str, file_size_str);
-			}
-			Err(error) => {
-				println!("Failed to fetch file: {}", error);
-			}
-		}
-	}
-
-	println!("Total file size: {}", to_human_readable_size(total_size));
-}
-
-fn is_recent_file(metadata: &fs::Metadata) -> bool {
-	let time = metadata.created().unwrap();
-	time.elapsed().unwrap().as_secs() < 60 * 60 * 4
-}
-
-fn collect_recent_files(path: impl Into<PathBuf>, filepaths: &mut Vec<PathBuf>) -> io::Result<()> {
-	fn collect_recent_files(dir: fs::ReadDir, filepaths: &mut Vec<PathBuf>) -> io::Result<()> {
-		for file in dir {
-			let file = file?;
-			let metadata = file.metadata()?;
-			match metadata {
-				data if data.is_dir() => {
-					collect_recent_files(std::fs::read_dir(file.path())?, filepaths)?
-				}
-				data if data.is_file() => {
-					if is_recent_file(&data) {
-						filepaths.push(file.path())
-					}
-				}
-				_ => {}
-			}
-		}
-		Ok(())
-	}
-
-	collect_recent_files(std::fs::read_dir(path.into())?, filepaths)
-}
-
-fn scan_file_dates(path: impl Into<PathBuf>) {
-	let mut recent_files = Vec::new();
-	collect_recent_files(path, &mut recent_files).unwrap();
-	let mut total_recent_size = 0;
-	for path in recent_files {
-		let file_size = fs::metadata(&path).unwrap().len();
-		let file_size_str = to_human_readable_size(file_size);
-		total_recent_size += file_size;
-		println!(
-			"{}: {}",
-			path.as_os_str()
-				.to_str()
-				.unwrap_or("Failed to convert path to string"),
-			file_size_str
-		);
-	}
-	println!(
-		"Total file size: {}",
-		to_human_readable_size(total_recent_size)
-	);
-}
-
-fn main2() {
-	let args = std::env::args().collect::<Vec<String>>();
-
-	if args.len() < 3 {
-		println!("Usage: {} <path> (size|date)", args[0]);
-		return;
-	}
-
-	match args[2].to_lowercase().as_str() {
-		"size" => scan_file_sizes(args[1].clone()),
-		"date" => scan_file_dates(args[1].clone()),
-		_ => println!("Usage: <path> {} (size|date)", args[0]),
-	}
 }
 
 fn print_indent(indent: u32) {
@@ -557,15 +228,15 @@ fn handle_list(args: clap::ArgMatches, context: &mut Context) {
 	match args.subcommand().unwrap() {
 		("tracks", _) => {
 			let track_db = &mut context.track_db;
-			if track_db.tracked_paths.len() == 0 {
+			if track_db.tracked_paths().len() == 0 {
 				println!("No tracked paths");
 			} else {
 				println!("Tracked paths: ");
-				for (path, track) in &track_db.tracked_paths {
+				for (path, track) in track_db.tracked_paths() {
 					println!(
 						"    {}: {}",
 						path.as_os_str().to_str().unwrap(),
-						track.depth
+						track.depth()
 					);
 				}
 			}
@@ -582,12 +253,12 @@ fn handle_list(args: clap::ArgMatches, context: &mut Context) {
 				return;
 			};
 
-			if track.snapshots.len() == 0 {
+			if track.count_snapshots() == 0 {
 				println!("No snapshots taken");
 				return;
 			}
 
-			for (i, snapshot) in track.snapshots.iter().enumerate() {
+			for (i, snapshot) in track.snapshots().iter().enumerate() {
 				let date_time = chrono::Local
 					.timestamp_opt(snapshot.time as i64, 0)
 					.unwrap();
@@ -615,7 +286,7 @@ fn handle_show(args: clap::ArgMatches, context: &mut Context) {
 	};
 
 	let snapshot = if let Some(id) = snapshot_id {
-		let Some(snapshot) = track.snapshots.get(id as usize) else {
+		let Some(snapshot) = track.get_snapshot(id) else {
 			println!("Snapshot {id} does not exist");
 			return;
 		};
@@ -628,7 +299,9 @@ fn handle_show(args: clap::ArgMatches, context: &mut Context) {
 		snapshot
 	};
 
-	print_fs_entry_snapshot(&snapshot.path, &snapshot.root, 0, max_depth, &|x| x.normal());
+	print_fs_entry_snapshot(&snapshot.path, &snapshot.root, 0, max_depth, &|x| {
+		x.normal()
+	});
 }
 
 fn handle_snap(args: clap::ArgMatches, context: &mut Context) {
@@ -639,7 +312,7 @@ fn handle_snap(args: clap::ArgMatches, context: &mut Context) {
 	if path == "*" {
 		paths_to_snap = context
 			.track_db
-			.tracked_paths
+			.tracked_paths()
 			.iter()
 			.map(|(path, _)| path)
 			.cloned()
@@ -670,15 +343,19 @@ fn handle_snap(args: clap::ArgMatches, context: &mut Context) {
 
 		println!("Snapping {}", path.to_string_lossy());
 
-		let depth = depth.unwrap_or(track.depth);
-		let Ok(snapshot) = take_snapshot(&path, depth) else {
+		let depth = depth.unwrap_or(track.depth());
+		let mut ruleset = SnapshotRuleSet::new();
+		// The root is captured to `depth`, so its children are captured to `depth - 1`
+		ruleset.add_rule(PathPattern::Wildcard, SnapshotRule::Single(depth - 1));
+		let snapshot_taker = SnapshotTaker::new(&path, ruleset);
+		let Ok(snapshot) = snapshot_taker.wait() else {
 			println!("Failed to take snapshot of {}", path.to_string_lossy());
 			return;
 		};
 
 		track.add_snapshot(FSSnapshot {
 			root: snapshot,
-			path: path.to_str().unwrap().to_owned(),
+			path: format!("{}", path.display()),
 			depth,
 			time,
 		});
@@ -707,24 +384,22 @@ fn handle_compare(args: clap::ArgMatches, context: &mut Context) {
 	};
 
 	let (old, new) = if let Some((id1, id2)) = snapshot1_id.zip(snapshot2_id) {
-		let Some(old) = track.snapshots.get(id1 as usize) else {
+		let Some(old) = track.get_snapshot(id1) else {
 			println!("Snapshot {id1} does not exist");
 			return;
 		};
-		let Some(new) = track.snapshots.get(id2 as usize) else {
+		let Some(new) = track.get_snapshot(id2) else {
 			println!("Snapshot {id2} does not exist");
 			return;
 		};
 		(old, new)
 	} else {
-		if track.snapshots.len() < 2 {
+		if track.count_snapshots() < 2 {
 			println!("Atleast 2 snapshots are required for comparison");
 			return;
 		}
-		(
-			&track.snapshots[track.snapshots.len() - 2],
-			track.snapshots.last().unwrap(),
-		)
+		let snapshots = track.snapshots();
+		(&snapshots[snapshots.len() - 2], snapshots.last().unwrap())
 	};
 
 	fn show_diff_helper(
@@ -767,8 +442,7 @@ fn handle_compare(args: clap::ArgMatches, context: &mut Context) {
 			if dir_diff.file_diffs.len() != 0 {
 				let mut sorted_diffs: Vec<_> = dir_diff.file_diffs.iter().by_ref().collect();
 				sorted_diffs.sort_by_key(|&(_, diff)| {
-					diff
-						.size_diff()
+					diff.size_diff()
 						.map(|size_diff| size_diff.new_size as i64 - size_diff.old_size as i64)
 						.unwrap_or(0)
 				});
