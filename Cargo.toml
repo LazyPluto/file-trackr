@@ -10,3 +10,4 @@ dunce = "1"
 clap = { version ="4", features = ["derive"] }
 colored = "2"
 chrono = "0.4"
+shell-words = "1"

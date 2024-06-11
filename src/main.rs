@@ -555,7 +555,13 @@ fn handle_exit(_args: clap::ArgMatches, context: &mut Context) {
 }
 
 fn handle_command(command: &str, context: &mut Context) {
-	let parts = command.split_ascii_whitespace().collect::<Vec<_>>();
+	let parts = match shell_words::split(command) {
+		Ok(parts) => parts,
+		Err(err) => {
+			println!("{}", format!("Failed to parse command: {err}").red());
+			return;
+		}
+	};
 	if parts.len() < 1 {
 		return;
 	}
