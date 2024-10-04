@@ -361,9 +361,7 @@ fn handle_list(args: clap::ArgMatches, context: &mut Context) {
 fn handle_show(args: clap::ArgMatches, context: &mut Context) {
 	let max_depth = args.get_one::<u32>("depth").copied().unwrap_or(u32::MAX);
 	let snapshot_id = args.get_one::<u32>("id").copied();
-	let path = args
-		.get_one::<String>("path")
-		.map(|path| PathBuf::from(path));
+	let path = args.get_one::<String>("path").map(PathBuf::from);
 
 	let track = &context.track;
 	let snapshot = if let Some(id) = snapshot_id {
@@ -425,9 +423,7 @@ fn handle_compare(args: clap::ArgMatches, context: &mut Context) {
 		return;
 	}
 
-	let path = args
-		.get_one::<String>("path")
-		.map(|path| PathBuf::from(path));
+	let path = args.get_one::<String>("path").map(PathBuf::from);
 
 	let track = &context.track;
 	let (old, new) = if let Some((id1, id2)) = snapshot1_id.zip(snapshot2_id) {
@@ -468,7 +464,8 @@ fn handle_compare(args: clap::ArgMatches, context: &mut Context) {
 	} else {
 		(&old.root, &new.root)
 	};
-	let diff = FSEntrySnapshotDiff::compute(&old_root, &new_root);
+
+	let diff = FSEntrySnapshotDiff::compute(old_root, new_root, depth);
 	if diff.has_changes() {
 		let old_time = to_human_readable_time(old.time as i64);
 		let new_time = to_human_readable_time(new.time as i64);

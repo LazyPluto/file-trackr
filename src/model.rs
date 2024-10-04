@@ -418,7 +418,7 @@ pub struct DirSnapshotDiff {
 }
 
 impl DirSnapshotDiff {
-	pub fn compute(old: &DirSnapshot, new: &DirSnapshot) -> Self {
+	pub fn compute(old: &DirSnapshot, new: &DirSnapshot, depth: u32) -> Self {
 		let mut result = DirSnapshotDiff {
 			size_diff: SizeDiff::compute(old.size, new.size),
 			file_diffs: Vec::new(),
@@ -426,9 +426,14 @@ impl DirSnapshotDiff {
 			deleted_files: Vec::new(),
 		};
 
+		if depth == 0 {
+			// Only size diff is required at depth = 0.
+			return result;
+		}
+
 		for (name_a, snapshot_a) in &old.files {
 			if let Some(snapshot_b) = new.get_file_snapshot(name_a) {
-				let snapshot_diff = FSEntrySnapshotDiff::compute(snapshot_a, snapshot_b);
+				let snapshot_diff = FSEntrySnapshotDiff::compute(snapshot_a, snapshot_b, depth - 1);
 				if snapshot_diff.has_changes() {
 					result.file_diffs.push((name_a.clone(), snapshot_diff));
 				}
@@ -489,13 +494,13 @@ pub enum FSEntrySnapshotDiff {
 }
 
 impl FSEntrySnapshotDiff {
-	pub fn compute(old: &FSEntrySnapshot, new: &FSEntrySnapshot) -> Self {
+	pub fn compute(old: &FSEntrySnapshot, new: &FSEntrySnapshot, depth: u32) -> Self {
 		match (&old, &new) {
 			(FSEntrySnapshot::File(old), FSEntrySnapshot::File(new)) => {
 				Self::File(FileSnapshotDiff::compute(old, new))
 			}
 			(FSEntrySnapshot::Directory(old), FSEntrySnapshot::Directory(new)) => {
-				Self::Directory(DirSnapshotDiff::compute(old, new))
+				Self::Directory(DirSnapshotDiff::compute(old, new, depth))
 			}
 			_ => panic!(),
 		}
