@@ -121,20 +121,7 @@ impl SnapshotTaker {
 }
 
 fn to_human_readable_size(size: u64) -> String {
-	const SIZE_TYPES: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
-
-	if size < 1024 {
-		return format!("{} B", size);
-	}
-
-	let mut size = size as f64;
-	let mut idx = 0;
-	while size > 1024.0 && idx < SIZE_TYPES.len() {
-		size /= 1024.0;
-		idx += 1;
-	}
-
-	format!("{:.2} {}", size, SIZE_TYPES[idx])
+	humansize::format_size(size, humansize::BINARY)
 }
 
 fn to_human_readable_time(time: i64) -> impl Display {
