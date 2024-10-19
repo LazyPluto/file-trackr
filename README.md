@@ -17,13 +17,13 @@ $ cargo run track.json
 
 ```console
 $ file-trackr track.json
->> add D:\Folder1
-Adding D:\Folder1 to the database
 
->> snap D:\Folder1
-Snapping D:\Folder1
+# It will ask for the path to track the first time you run it.
+Path to track: D:\Folder1
 
->> show D:\Folder1
+>> snap
+
+>> show
 D:\Folder1: 69.69 GiB
     SubFolder1: 1.00 GiB
     SubFolder2: 1.00 GiB
@@ -31,10 +31,9 @@ D:\Folder1: 69.69 GiB
     ...
 
 # After some changes to the filesystem..
->> snap D:\Folder1
-Snapping D:\Folder1
+>> snap
 
->> show D:\Folder1
+>> show
 D:\Folder1: 420.69 GiB
     SubFolder1: 1.00 GiB
     SomeRandomFolder: 350.00 GiB
@@ -42,7 +41,8 @@ D:\Folder1: 420.69 GiB
     SubFolder3: 67.69 GiB
     ...
 
->> compare Folder1
+>> compare
+Sat 19 Oct 2024 13:41:00 -> Sat 19 Oct 2024 14:02:50
 D:\Folder1: 69.69 GiB -> 420.69 GiB: + 351.00 GiB
     SubFolder2: 1.00 GiB -> 2.00 GiB: +1.00 GiB:
         Some other folder: 512.00 MiB -> 1.00 GiB: +512.00 MiB

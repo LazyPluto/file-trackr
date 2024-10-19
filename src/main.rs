@@ -685,7 +685,8 @@ fn main() {
 			clap::Command::new("simplify")
 				.about("Simplifies the rule tree")
 				.arg(clap::arg!([path] "Path whose rule must be simplified")),
-		);
+		)
+		.about("Displays/modifies the ruleset used for taking snapshots");
 	commands.push((rule_command, handle_rule));
 
 	let help_command = clap::Command::new("help")
