@@ -221,20 +221,26 @@ impl SnapshotRuleSet {
 			match rule {
 				SnapshotRule::Single(_) => self.add_rule(pattern, rule),
 				SnapshotRule::RuleSet(ruleset) => {
-					if let Some(rule) = self.find_rule_mut(&pattern) {
-						match rule {
-							SnapshotRule::Single(depth) => {
-								let mut set = SnapshotRuleSet::new();
-								set.update(ruleset);
-								set.add_rule(PathPattern::Wildcard, SnapshotRule::Single(*depth));
-								*rule = SnapshotRule::RuleSet(set);
-							}
-							SnapshotRule::RuleSet(set) => {
-								set.update(ruleset);
-							}
-						}
-					} else {
+					let Some(rule) = self.find_rule_mut(&pattern) else {
 						self.add_rule(pattern, SnapshotRule::RuleSet(ruleset));
+						continue;
+					};
+
+					match rule {
+						SnapshotRule::Single(depth) => {
+							let mut set = SnapshotRuleSet::new();
+							set.update(ruleset);
+							if *depth != 0 {
+								set.add_rule(
+									PathPattern::Wildcard,
+									SnapshotRule::Single(*depth - 1),
+								);
+							}
+							*rule = SnapshotRule::RuleSet(set);
+						}
+						SnapshotRule::RuleSet(set) => {
+							set.update(ruleset);
+						}
 					}
 				}
 			}
